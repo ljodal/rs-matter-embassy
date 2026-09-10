@@ -103,6 +103,14 @@ const PANIC_MSG_CAP: usize = 480;
 /// USB would never stay up long enough to read the message off.
 const MAX_AUTO_RESETS: u32 = 3;
 
+/// How long [`report_last_panic`] holds after reporting a panic.
+///
+/// The logger only drains its buffer once the host opens the CDC port, and the
+/// reset throws that buffer away - so a panic early in `main` would otherwise
+/// be reported and then immediately lost to the next reset, before any
+/// terminal could reattach. Holding here buys time to reattach one.
+const PANIC_REPORT_GRACE: Duration = Duration::from_secs(10);
+
 #[repr(C)]
 struct PanicState {
     /// `PANIC_MAGIC` once the rest of the struct is meaningful.
@@ -168,10 +176,11 @@ fn panic(info: &PanicInfo) -> ! {
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// Log the panic message left behind by the previous run, if any.
+/// Log the panic message left behind by the previous run, if any, and then
+/// hold for [`PANIC_REPORT_GRACE`] so it can actually be read.
 ///
 /// Call this right after spawning [`logger_task`].
-pub fn report_last_panic() {
+pub async fn report_last_panic() {
     let state = panic_state();
 
     let pending = unsafe {
@@ -204,6 +213,13 @@ pub fn report_last_panic() {
     if resets >= MAX_AUTO_RESETS {
         warn!("Panicked {} times in a row; not rebooting again", resets);
     }
+
+    warn!(
+        "Holding {}s so a serial terminal can pick that up before we carry on",
+        PANIC_REPORT_GRACE.as_secs()
+    );
+
+    Timer::after(PANIC_REPORT_GRACE).await;
 }
 
 /// Forget the consecutive-panic count, re-arming the panic handler's reboot

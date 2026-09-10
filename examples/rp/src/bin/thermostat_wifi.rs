@@ -1,4 +1,4 @@
-//! An example utilizing the `EmbassyWifiMatterStack` struct to expose *four*
+//! An example utilizing the `EmbassyWifiMatterStack` struct to expose several
 //! simulated heating zones as a Matter bridge.
 //!
 //! Like `light_wifi`, this uses Wifi as the main transport and BLE for
@@ -8,11 +8,11 @@
 //! ```text
 //! ep0        Root node       (the hidden Matter system clusters)
 //! ep1        Aggregator      (Descriptor only)
-//! ep2..ep5   Bridged Node + Thermostat
+//! ep2..      Bridged Node + Thermostat, one per zone
 //!            (Descriptor, BridgedDeviceBasicInformation, Identify, Thermostat)
 //! ```
 //!
-//! The bridge shape - rather than four bare Thermostat endpoints - is what a
+//! The bridge shape - rather than bare Thermostat endpoints - is what a
 //! real "one MCU, several remote sensors" device wants: each zone gets its own
 //! `NodeLabel` (so it shows up named in the ecosystem app rather than as
 //! "Thermostat 2") and its own `Reachable` flag, which is how you tell a
@@ -128,7 +128,16 @@ macro_rules! zone_endpoint {
 /// `ChainedHandler<..>` type, so the chain cannot be built by folding over the
 /// zone arrays at runtime.
 macro_rules! chain_zones {
-    ($handler:expr, $identifies:expr, $infos:expr, $thermostats:expr, $($index:literal),+) => {
+    ($handler:expr, $identifies:expr, $infos:expr, $thermostats:expr, $($index:literal),+) => {{
+        // Indexing the per-zone arrays by literal is not something the
+        // compiler rejects when the literal is out of range - it compiles and
+        // panics at boot - so check the list covers exactly the zones that
+        // exist.
+        const _: () = assert!(
+            [$($index),+].len() == ZONE_COUNT,
+            "`chain_zones!` needs exactly one index per ZONE_NAMES entry"
+        );
+
         $handler
         $(
             .chain(
@@ -147,7 +156,7 @@ macro_rules! chain_zones {
                 Async(thermostat::HandlerAdaptor(&$thermostats[$index])),
             )
         )+
-    };
+    }};
 }
 
 bind_interrupts!(struct Irqs {
@@ -203,7 +212,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(logger_task(UsbDriver::new(p.USB, UsbIrqs)).unwrap());
 
     // Whatever the previous run died of, now that the logger is up
-    report_last_panic();
+    report_last_panic().await;
 
     info!("Starting...");
 
@@ -274,7 +283,7 @@ async fn main(spawner: Spawner) {
             Async(aggregator_desc.adapt()),
         );
 
-    let handler = chain_zones!(handler, identifies, infos, thermostats, 0, 1, 2, 3);
+    let handler = chain_zones!(handler, identifies, infos, thermostats, 0, 1);
 
     // Create a KV BLOB store and load any previously saved state of `rs-matter`
     // `SeqMapKvBlobStore` saves to a user-supplied NOR Flash region
@@ -349,15 +358,24 @@ const DEV_DET: BasicInfoConfig = BasicInfoConfig {
     ..TEST_DEV_DET
 };
 
-/// The number of simulated heating zones.
-///
-/// Bumping this to 6 is just this constant plus two more `ZONE_NAMES` entries -
-/// nothing in `rs-matter` or `rs-matter-stack` caps the endpoint count, and a
-/// controller's wildcard subscription covers all of them at once.
-const ZONE_COUNT: usize = 4;
-
 /// The names the bridge suggests to the ecosystem, via `NodeLabel`.
-const ZONE_NAMES: [&str; ZONE_COUNT] = ["Living Room", "Kitchen", "Bedroom", "Bathroom"];
+///
+/// This list is what defines how many zones there are. Nothing in `rs-matter`
+/// or `rs-matter-stack` caps the endpoint count, and a controller's wildcard
+/// subscription covers all of them at once - but three *other* places have to
+/// agree with this one, because the handler chain and the node metadata are
+/// both built at compile time and cannot be looped over:
+///
+/// * `ZONE_UNIQUE_IDS`, below
+/// * the `zone_endpoint!` list in `NODE`
+/// * the index list passed to `chain_zones!` in `main`
+///
+/// All three are checked against this list by `const` assertions, so getting
+/// one wrong is a compile error rather than a panic at boot.
+const ZONE_NAMES: &[&str] = &["Living Room", "Bathroom"];
+
+/// The number of simulated heating zones, derived from [`ZONE_NAMES`].
+const ZONE_COUNT: usize = ZONE_NAMES.len();
 
 /// Endpoint 0 (the root endpoint) always runs the hidden Matter system
 /// clusters, so the aggregator gets ID=1 and the zones follow it.
@@ -389,10 +407,14 @@ const NODE: Node = Node {
         ),
         zone_endpoint!(0),
         zone_endpoint!(1),
-        zone_endpoint!(2),
-        zone_endpoint!(3),
     ],
 };
+
+// The root endpoint and the aggregator, plus one endpoint per zone.
+const _: () = assert!(
+    NODE.endpoints.len() == ZONE_COUNT + 2,
+    "NODE needs exactly one `zone_endpoint!` per ZONE_NAMES entry"
+);
 
 //
 // BridgedDeviceBasicInformation
@@ -429,7 +451,12 @@ impl BridgedZoneInfo {
 
 /// Stable per-zone identities. Static strings so that `unique_id` needs no
 /// formatting buffer.
-const ZONE_UNIQUE_IDS: [&str; ZONE_COUNT] = ["zone-1", "zone-2", "zone-3", "zone-4"];
+const ZONE_UNIQUE_IDS: &[&str] = &["zone-1", "zone-2"];
+
+const _: () = assert!(
+    ZONE_UNIQUE_IDS.len() == ZONE_COUNT,
+    "ZONE_UNIQUE_IDS must have one entry per ZONE_NAMES entry"
+);
 
 impl bdbi::ClusterHandler for BridgedZoneInfo {
     const CLUSTER: Cluster<'static> = BDBI_CLUSTER;

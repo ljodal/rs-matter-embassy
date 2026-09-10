@@ -42,12 +42,12 @@ Upon successful commissioning, you should end up with a Light device which you c
 ## The RP thermostat example
 
 `thermostat_wifi` is the same Wifi + BLE-commissioning assembly as `light_wifi`, but with a more
-interesting data model: it exposes four simulated heating zones as a Matter *bridge*.
+interesting data model: it exposes two simulated heating zones as a Matter *bridge*.
 
 ```text
 ep0        Root node       (the hidden Matter system clusters)
 ep1        Aggregator      (Descriptor only)
-ep2..ep5   Bridged Node + Thermostat
+ep2..ep3   Bridged Node + Thermostat
            (Descriptor, BridgedDeviceBasicInformation, Identify, Thermostat)
 ```
 
@@ -56,7 +56,7 @@ the Matter IDL into `dm::clusters::decl`, so the example implements `decl::therm
 itself. The zones are heat-only (the `HEATING` feature) and their temperatures drift slowly towards
 their heating setpoints, so writing a setpoint from a controller gives visible feedback.
 
-The bridge shape - rather than four bare Thermostat endpoints - is what a real "one MCU, several
+The bridge shape - rather than two bare Thermostat endpoints - is what a real "one MCU, several
 remote sensors" device wants: `BridgedDeviceBasicInformation` gives each zone its own `NodeLabel`
 (so the zones show up named rather than as "Thermostat 2") and its own `Reachable` flag, which is
 how a bridge tells a controller that one of its sensors has gone silent.

@@ -116,7 +116,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(logger_task(UsbDriver::new(p.USB, UsbIrqs)).unwrap());
 
     // Whatever the previous run died of, now that the logger is up
-    report_last_panic();
+    report_last_panic().await;
 
     info!("Starting...");
 
