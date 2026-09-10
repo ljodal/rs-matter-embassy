@@ -43,10 +43,19 @@ bind_interrupts!(pub struct UsbIrqs {
 /// that does not fit is silently dropped.
 pub const LOG_RINGBUF_SIZE: usize = 16384;
 
+/// The maximum log level pumped out over USB.
+///
+/// Worth raising to `Debug` when a controller is not showing what you expect:
+/// the IDL-generated cluster code logs every attribute read and write at that
+/// level, with the value and the handler's result, so the log then shows
+/// exactly which attributes the controller asked for and what it was told.
+/// It is a *lot* of output - expect the ring-buffer to drop some of it.
+pub const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Info;
+
 /// Pumps the `log` output to the host over the USB CDC ACM serial interface.
 #[embassy_executor::task]
 pub async fn logger_task(driver: UsbDriver<'static, USB>) {
-    embassy_usb_logger::run!(LOG_RINGBUF_SIZE, log::LevelFilter::Info, driver);
+    embassy_usb_logger::run!(LOG_RINGBUF_SIZE, LOG_LEVEL, driver);
 }
 
 /// Re-print the commissioning code every `every` for as long as the device has

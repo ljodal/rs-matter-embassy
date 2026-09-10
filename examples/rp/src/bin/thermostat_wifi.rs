@@ -523,9 +523,12 @@ impl ThermostatZone {
             dataver,
             endpoint_id: zone_endpoint_id(index),
             state: Mutex::new(RefCell::new(ZoneState {
-                // Stagger the zones a little, so they are easy to tell apart
-                // in a controller before anything has been written to them.
-                local_temperature: celsius(18, 0) + celsius(1, 0) * index as i16,
+                // Stagger the zones so they are easy to tell apart in a
+                // controller before anything has been written to them. The
+                // half-degree offset keeps every starting temperature distinct
+                // from the starting setpoint below, so that a value seen in a
+                // controller is never ambiguous between the two.
+                local_temperature: celsius(16, 50) + celsius(1, 0) * index as i16,
                 heating_setpoint: celsius(21, 0),
                 system_mode: thermostat::SystemModeEnum::Heat,
             })),
