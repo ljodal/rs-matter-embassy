@@ -21,8 +21,9 @@ use embassy_net_wiznet::{Runner, State};
 
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, USB};
 use embassy_rp::spi::{Async as SpiAsync, Config as SpiConfig, Spi};
+use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use embassy_rp::{bind_interrupts, dma};
 
 use embassy_time::Delay;
@@ -49,9 +50,8 @@ use rs_matter_embassy::matter::persist::DummyKvBlobStore;
 use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
 use rs_matter_embassy::matter::{clusters, devices};
 
-use defmt::{info, unwrap};
+use log::info;
 
-use panic_rtt_target as _;
 use rs_matter_embassy::stack::rand::reseeding_csprng;
 
 macro_rules! mk_static {
@@ -66,7 +66,25 @@ macro_rules! mk_static {
 
 bind_interrupts!(struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
+    USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
+
+/// A simple halting panic handler.
+///
+/// The USB logger runs as an async task, so it can no longer flush once we've
+/// panicked - hence there is no point trying to log the panic message here.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {
+        cortex_m::asm::wfe();
+    }
+}
+
+/// Pumps the `log` output to the host over the USB CDC ACM serial interface.
+#[embassy_executor::task]
+async fn logger_task(driver: UsbDriver<'static, USB>) {
+    embassy_usb_logger::run!(LOG_RINGBUF_SIZE, log::LevelFilter::Info, driver);
+}
 
 /// The amount of memory for allocating all `rs-matter-stack` futures created during
 /// the execution of the `run*` methods.
@@ -106,7 +124,9 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_rp::init(Default::default());
 
-    rtt_target::rtt_init_defmt!(rtt_target::ChannelMode::NoBlockSkip, LOG_RINGBUF_SIZE);
+    // Start logging over the USB CDC serial interface, so logs (including the
+    // commissioning QR code) are visible on the host without a debug probe.
+    spawner.spawn(logger_task(UsbDriver::new(p.USB, Irqs)).unwrap());
 
     info!("Starting...");
 
@@ -118,19 +138,17 @@ async fn main(spawner: Spawner) {
     let w5500_int = Input::new(p.PIN_21, Pull::Up);
     let w5500_reset = Output::new(p.PIN_20, Level::High);
 
-    let (device, runner) = unwrap!(
-        embassy_net_wiznet::new(
-            [0x02, 0x00, 0x00, 0x00, 0x00, 0x00],
-            mk_static!(State::<8, 8>, State::new()),
-            ExclusiveDevice::new(spi, cs, Delay),
-            w5500_int,
-            w5500_reset,
-        )
-        .await,
-        "Failed to initialize W5500",
-    );
+    let (device, runner) = embassy_net_wiznet::new(
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x00],
+        mk_static!(State::<8, 8>, State::new()),
+        ExclusiveDevice::new(spi, cs, Delay),
+        w5500_int,
+        w5500_reset,
+    )
+    .await
+    .expect("Failed to initialize W5500");
 
-    spawner.spawn(unwrap!(ethernet_task(runner)));
+    spawner.spawn(ethernet_task(runner).unwrap());
 
     // Statically allocate the Matter stack.
     // For MCUs, it is best to allocate it statically, so as to avoid program stack blowups (its memory footprint is ~ 35 to 50KB).
@@ -199,7 +217,7 @@ async fn main(spawner: Spawner) {
     ));
 
     // Run Matter
-    unwrap!(matter.await);
+    matter.await.unwrap();
 }
 
 #[embassy_executor::task]

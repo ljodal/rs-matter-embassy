@@ -51,7 +51,6 @@ fn main() {
     if !rp235x {
         println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
     }
-    println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 }
 
 #[cfg(not(feature = "skip-cyw43-firmware"))]
