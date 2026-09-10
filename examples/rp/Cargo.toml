@@ -4,12 +4,21 @@ version = "0.1.0"
 edition = "2021"
 resolver = "2"
 
+[lib]
+name = "rp_examples"
+harness = false
+test = false
+
 [[bin]]
 name = "light_wifi"
 harness = false
 
 [[bin]]
 name = "light_eth"
+harness = false
+
+[[bin]]
+name = "thermostat_wifi"
 harness = false
 
 # "s" rather than "z" in both profiles: under minsize, LLVM (23+) lowers
@@ -97,6 +106,7 @@ cortex-m = "0.7.6"
 cortex-m-rt = "0.7"
 
 static_cell = "2"
+heapless = "0.9"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
 
 [build-dependencies]

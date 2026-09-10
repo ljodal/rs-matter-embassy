@@ -25,9 +25,9 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::dma;
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0};
 use embassy_rp::pio::InterruptHandler;
-use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
+use embassy_rp::usb::Driver as UsbDriver;
 
 use embedded_alloc::LlffHeap;
 
@@ -50,6 +50,8 @@ use rs_matter_embassy::matter::persist::DummyKvBlobStore;
 use rs_matter_embassy::matter::utils::init::InitMaybeUninit;
 use rs_matter_embassy::matter::{clusters, devices};
 use rs_matter_embassy::stack::rand::reseeding_csprng;
+
+use rp_examples::{logger_task, report_last_panic, UsbIrqs};
 use rs_matter_embassy::wireless::rp::RpWifiDriver;
 use rs_matter_embassy::wireless::{EmbassyWifi, EmbassyWifiMatterStack};
 
@@ -66,25 +68,7 @@ macro_rules! mk_static {
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
-    USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
-
-/// A simple halting panic handler.
-///
-/// The USB logger runs as an async task, so it can no longer flush once we've
-/// panicked - hence there is no point trying to log the panic message here.
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        cortex_m::asm::wfe();
-    }
-}
-
-/// Pumps the `log` output to the host over the USB CDC ACM serial interface.
-#[embassy_executor::task]
-async fn logger_task(driver: UsbDriver<'static, USB>) {
-    embassy_usb_logger::run!(LOG_RINGBUF_SIZE, log::LevelFilter::Info, driver);
-}
 
 /// The amount of memory for allocating all `rs-matter-stack` futures created during
 /// the execution of the `run*` methods.
@@ -106,9 +90,6 @@ const BUMP_SIZE: usize = 40960;
 
 #[global_allocator]
 static HEAP: LlffHeap = LlffHeap::empty();
-
-/// We need a bigger log ring-buffer or else the device QR code printout is half-lost
-const LOG_RINGBUF_SIZE: usize = 16384;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -132,7 +113,10 @@ async fn main(spawner: Spawner) {
 
     // Start logging over the USB CDC serial interface, so logs (including the
     // commissioning QR code) are visible on the host without a debug probe.
-    spawner.spawn(logger_task(UsbDriver::new(p.USB, Irqs)).unwrap());
+    spawner.spawn(logger_task(UsbDriver::new(p.USB, UsbIrqs)).unwrap());
+
+    // Whatever the previous run died of, now that the logger is up
+    report_last_panic();
 
     info!("Starting...");
 
