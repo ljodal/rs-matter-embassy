@@ -477,6 +477,7 @@ const THERMOSTAT_CLUSTER: Cluster<'static> = thermostat::FULL_CLUSTER
         thermostat::AttributeId::OccupiedHeatingSetpoint
             | thermostat::AttributeId::AbsMinHeatSetpointLimit
             | thermostat::AttributeId::AbsMaxHeatSetpointLimit
+            | thermostat::AttributeId::ThermostatRunningState
     ))
     .with_cmds(with!(thermostat::CommandId::SetpointRaiseLower));
 
@@ -487,11 +488,19 @@ const fn celsius(whole: i16, hundredths: i16) -> i16 {
 
 /// The setpoint range we accept, reported as `AbsMinHeatSetpointLimit` /
 /// `AbsMaxHeatSetpointLimit`.
-const ABS_MIN_HEAT_SETPOINT: i16 = celsius(5, 0);
+///
+/// These are what a controller reads to build its setpoint dial: the spec's
+/// user-configurable `Min`/`MaxHeatSetpointLimit` pair is optional and not
+/// advertised here, so the absolute limits are the effective range. 15 °C
+/// rather than the spec's 7 °C default because nothing sensible asks a central
+/// heating zone for less.
+const ABS_MIN_HEAT_SETPOINT: i16 = celsius(15, 0);
 const ABS_MAX_HEAT_SETPOINT: i16 = celsius(30, 0);
 
-/// Where a zone drifts towards when its system mode is `Off`.
-const AMBIENT_TEMPERATURE: i16 = celsius(15, 0);
+/// Where a zone drifts towards when its system mode is `Off`. Below
+/// `ABS_MIN_HEAT_SETPOINT`, so switching a zone off is always visible as the
+/// temperature falling away from any setpoint it could have been given.
+const AMBIENT_TEMPERATURE: i16 = celsius(12, 0);
 
 /// How fast the simulation runs: one step of `SIMULATION_STEP` every
 /// `SIMULATION_TICK`. Slow enough to look like a room, fast enough that you do
@@ -505,6 +514,30 @@ struct ZoneState {
     /// `OccupiedHeatingSetpoint`, in 0.01 °C.
     heating_setpoint: i16,
     system_mode: thermostat::SystemModeEnum,
+    /// The heat-relay state last reported to controllers.
+    ///
+    /// Reads of `ThermostatRunningState` are computed on demand and so are
+    /// always current; this exists only so the simulation task can notice a
+    /// flip and report it - including a flip caused by a setpoint or
+    /// system-mode *write*, which it would otherwise miss by comparing only
+    /// against the state at the top of its own step.
+    reported_heating: bool,
+}
+
+impl ZoneState {
+    /// Whether the zone is calling for heat, i.e. the `HEAT` bit of
+    /// `ThermostatRunningState`.
+    fn is_heating(&self) -> bool {
+        matches!(self.system_mode, thermostat::SystemModeEnum::Heat)
+            && self.local_temperature < self.heating_setpoint
+    }
+}
+
+/// What one simulation step changed, and hence what needs reporting.
+#[derive(Default)]
+struct StepOutcome {
+    temperature_changed: bool,
+    running_state_changed: bool,
 }
 
 /// The `Thermostat` cluster for one simulated zone.
@@ -531,13 +564,16 @@ impl ThermostatZone {
                 local_temperature: celsius(16, 50) + celsius(1, 0) * index as i16,
                 heating_setpoint: celsius(21, 0),
                 system_mode: thermostat::SystemModeEnum::Heat,
+                // Every zone starts below its setpoint in `Heat`, so every
+                // zone starts out calling for heat.
+                reported_heating: true,
             })),
         }
     }
 
     /// Move the simulated temperature one step towards where it should be
-    /// heading. Returns whether the value actually changed.
-    fn simulate_step(&self) -> bool {
+    /// heading, and report what changed.
+    fn simulate_step(&self) -> StepOutcome {
         self.state.lock(|state| {
             let mut state = state.borrow_mut();
 
@@ -548,14 +584,19 @@ impl ThermostatZone {
 
             let delta = target - state.local_temperature;
 
-            if delta == 0 {
-                return false;
+            if delta != 0 {
+                // Never overshoot: the last step is however much is left.
+                state.local_temperature += delta.clamp(-SIMULATION_STEP, SIMULATION_STEP);
             }
 
-            // Never overshoot: the last step is however much is left.
-            state.local_temperature += delta.clamp(-SIMULATION_STEP, SIMULATION_STEP);
+            let heating = state.is_heating();
+            let running_state_changed = heating != state.reported_heating;
+            state.reported_heating = heating;
 
-            true
+            StepOutcome {
+                temperature_changed: delta != 0,
+                running_state_changed,
+            }
         })
     }
 
@@ -640,6 +681,20 @@ impl thermostat::ClusterHandler for ThermostatZone {
         }
     }
 
+    fn thermostat_running_state(
+        &self,
+        _ctx: impl ReadContext,
+    ) -> Result<thermostat::RelayStateBitmap, Error> {
+        // Heat-only, single stage: the `HEAT` bit is the whole story. A real
+        // controller would report the actual relay here, and would also want
+        // `PIHeatingDemand` if it modulates rather than bangs on and off.
+        Ok(if self.state.lock(|state| state.borrow().is_heating()) {
+            thermostat::RelayStateBitmap::HEAT
+        } else {
+            thermostat::RelayStateBitmap::empty()
+        })
+    }
+
     fn system_mode(&self, _ctx: impl ReadContext) -> Result<thermostat::SystemModeEnum, Error> {
         Ok(self.state.lock(|state| state.borrow().system_mode))
     }
@@ -692,11 +747,24 @@ impl thermostat::ClusterHandler for ThermostatZone {
         loop {
             Timer::after(SIMULATION_TICK).await;
 
-            if self.simulate_step() {
+            let outcome = self.simulate_step();
+
+            if outcome.temperature_changed {
                 ctx.notify_attr_changed(
                     self.endpoint_id,
                     Self::CLUSTER.id,
                     thermostat::AttributeId::LocalTemperature as _,
+                );
+            }
+
+            // A write can flip this too; picking it up here rather than in the
+            // write handlers costs at most one tick of reporting latency and
+            // keeps the flip detection in one place.
+            if outcome.running_state_changed {
+                ctx.notify_attr_changed(
+                    self.endpoint_id,
+                    Self::CLUSTER.id,
+                    thermostat::AttributeId::ThermostatRunningState as _,
                 );
             }
         }
