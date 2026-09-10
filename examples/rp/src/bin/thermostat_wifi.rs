@@ -62,6 +62,7 @@ use tinyrlibc as _;
 use log::info;
 
 use rs_matter_embassy::matter::crypto::{default_crypto, Crypto};
+use rs_matter_embassy::matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter_embassy::matter::dm::clusters::decl::bridged_device_basic_information as bdbi;
 use rs_matter_embassy::matter::dm::clusters::decl::thermostat;
 use rs_matter_embassy::matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -226,7 +227,7 @@ async fn main(spawner: Spawner) {
     // For MCUs, it is best to allocate it statically, so as to avoid program stack blowups (its memory footprint is ~ 35 to 50KB).
     // It is also (currently) a mandatory requirement when the wireless stack variation is used.
     let stack = mk_static!(EmbassyWifiMatterStack<BUMP_SIZE, ()>).init_with(
-        EmbassyWifiMatterStack::init(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT),
+        EmbassyWifiMatterStack::init(&DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT),
     );
 
     // Create the crypto provider, using the ROSC RNG peripheral (which is a TRNG) as the source of randomness for a reseeding CSPRNG.
@@ -322,6 +323,31 @@ async fn main(spawner: Spawner) {
         .await
         .unwrap();
 }
+
+/// Basic information for the node.
+///
+/// The stock `TEST_DEV_DET` leaves `device_type` unset and names itself
+/// "MyTest", so this overrides both while keeping the test vendor/product IDs -
+/// those have to stay, because `TEST_DEV_ATT` attests to exactly that pair.
+///
+/// `device_name` and `device_type` are not real Basic Information attributes:
+/// they only ever reach a commissioner through the `DN` and `DT` keys of the
+/// `_matterc._udp` mDNS record (and `device_type` additionally as the `_T<dt>`
+/// PTR subtype). A commissioner that finds the device over BLE sees neither -
+/// the Matter BLE service data has room for the discriminator and the
+/// vendor/product IDs and nothing else - so these matter for on-network
+/// commissioning and for the window in concurrent commissioning after the
+/// device has joined Wifi. `product_name` and `vendor_name` *are* real
+/// attributes, and are what a controller reads back once it is in.
+///
+/// The advertised device type is the node's primary one, which for a bridge is
+/// the Aggregator on ep1 rather than anything on a bridged endpoint.
+const DEV_DET: BasicInfoConfig = BasicInfoConfig {
+    device_name: "Heating Zones",
+    device_type: Some(DEV_TYPE_AGGREGATOR.dtype),
+    product_name: "Heating Zone Bridge",
+    ..TEST_DEV_DET
+};
 
 /// The number of simulated heating zones.
 ///
