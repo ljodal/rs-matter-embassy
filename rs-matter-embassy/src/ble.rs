@@ -10,6 +10,11 @@
 //! backend drives, so the rest of the crate does not care which one is in use.
 //!
 //! The two backends are mutually exclusive, as both would otherwise claim the one BLE controller.
+//!
+//! The `trouble` backend additionally offers `BtpExternalGattPeripheral`, which serves
+//! commissioning on a `trouble-host` stack the caller built rather than building its own - for
+//! devices that need the BLE central role alongside Matter. There is no NimBLE equivalent: its
+//! host is a C singleton with no handle to borrow.
 
 use core::future::Future;
 
