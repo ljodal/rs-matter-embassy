@@ -39,6 +39,28 @@ NOTE: Since the firmware is not certified, the app will warn you about that. Dis
 
 Upon successful commissioning, you should end up with a Light device which you can turn on/off, and which will also turn on/off by itself every 5 secs.
 
+## The RP thermostat example
+
+`thermostat_wifi` is the same Wifi + BLE-commissioning assembly as `light_wifi`, but with a more
+interesting data model: it exposes four simulated heating zones as a Matter *bridge*.
+
+```text
+ep0        Root node       (the hidden Matter system clusters)
+ep1        Aggregator      (Descriptor only)
+ep2..ep5   Bridged Node + Thermostat
+           (Descriptor, BridgedDeviceBasicInformation, Identify, Thermostat)
+```
+
+`rs-matter` ships no hand-written Thermostat cluster, but its `build.rs` generates every cluster in
+the Matter IDL into `dm::clusters::decl`, so the example implements `decl::thermostat::ClusterHandler`
+itself. The zones are heat-only (the `HEATING` feature) and their temperatures drift slowly towards
+their heating setpoints, so writing a setpoint from a controller gives visible feedback.
+
+The bridge shape - rather than four bare Thermostat endpoints - is what a real "one MCU, several
+remote sensors" device wants: `BridgedDeviceBasicInformation` gives each zone its own `NodeLabel`
+(so the zones show up named rather than as "Thermostat 2") and its own `Reachable` flag, which is
+how a bridge tells a controller that one of its sensors has gone silent.
+
 ## How to build and flash
 
 ### rPI Pico and Pico W (RP2040)
@@ -49,9 +71,30 @@ Upon successful commissioning, you should end up with a Light device which you c
 cd rp
 cargo +nightly build
 
-# Replace `light_wifi` with `light_eth` below to flash the Ethernet example
+# Replace `light_wifi` with `light_eth` or `thermostat_wifi` as needed
 probe-rs run --chip rp2040 target/thumbv6m-none-eabi/debug/light_wifi
 ```
+
+Without a debug probe, hold BOOTSEL while plugging the board in and flash with `picotool` instead -
+which is what `cargo run` is configured to do:
+
+```sh
+cargo +nightly run --bin light_wifi
+```
+
+The examples log over a USB CDC ACM serial interface, so the logs (the commissioning QR code
+included) can be read off the board's own USB port with any serial terminal - no probe needed:
+
+```sh
+picocom /dev/ttyACM0     # or: screen /dev/ttyACM0, minicom -D /dev/ttyACM0
+```
+
+Two things make that usable in practice. The commissioning code is re-printed every 30s for as long
+as the device has no fabrics, so attaching the terminal after the board has already booted still
+gets you something to commission with. And because the USB logger is an async task - it cannot
+flush anything once the firmware has panicked - the panic handler stashes the message in a chunk of
+RAM that survives a reset and reboots, so the panic from the previous run is logged on the next
+boot. It gives up and halts after three consecutive panics, rather than reset-looping.
 
 ### rPI Pico 2 and Pico 2 W (RP2350)
 
@@ -64,8 +107,15 @@ and target (use `rp235xb` instead of `rp235xa` for the QFN-80 RP2350B):
 cd rp
 cargo +nightly build --no-default-features --features trouble,rp235xa --target thumbv8m.main-none-eabihf
 
-# Replace `light_wifi` with `light_eth` below to flash the Ethernet example
+# Replace `light_wifi` with `light_eth` or `thermostat_wifi` as needed
 probe-rs run --chip RP235x target/thumbv8m.main-none-eabihf/debug/light_wifi
+```
+
+Or, with no probe, over USB as described for the RP2040 above:
+
+```sh
+cargo +nightly run --no-default-features --features trouble,rp235xa \
+    --target thumbv8m.main-none-eabihf --bin thermostat_wifi
 ```
 
 ### Espressif MCUs
