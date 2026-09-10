@@ -189,6 +189,17 @@ const PAIRING_REMINDER: Duration = Duration::from_secs(30);
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // Necessary `embassy-rp` and `cyw43` initialization boilerplate
+
+    let p = embassy_rp::init(Default::default());
+
+    // Start logging over the USB CDC serial interface, so logs (including the
+    // commissioning QR code) are visible on the host without a debug probe.
+    spawner.spawn(logger_task(UsbDriver::new(p.USB, UsbIrqs)).unwrap());
+
+    // Whatever the previous run died of, now that the logger is up
+    report_last_panic().await;
+
     // `rs-matter` uses the `x509` crate which (still) needs a few kilos of heap space
     {
         // NimBLE allocates its mbuf/transport pools (~13K with the stock counts) and its GATT
@@ -202,17 +213,6 @@ async fn main(spawner: Spawner) {
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         unsafe { HEAP.init(addr_of_mut!(HEAP_MEM) as usize, HEAP_SIZE) }
     }
-
-    // Necessary `embassy-rp` and `cyw43` initialization boilerplate
-
-    let p = embassy_rp::init(Default::default());
-
-    // Start logging over the USB CDC serial interface, so logs (including the
-    // commissioning QR code) are visible on the host without a debug probe.
-    spawner.spawn(logger_task(UsbDriver::new(p.USB, UsbIrqs)).unwrap());
-
-    // Whatever the previous run died of, now that the logger is up
-    report_last_panic().await;
 
     info!("Starting...");
 

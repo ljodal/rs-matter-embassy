@@ -4,10 +4,11 @@
 //! nothing but a USB cable - no debug probe:
 //!
 //! * [`logger_task`] pumps `log` output to the host over USB CDC ACM.
-//! * [`report_last_panic`] prints the panic message from the *previous* run.
-//!   The USB logger is an async task, so it can no longer flush once we have
-//!   panicked; instead the panic handler stashes the message in a chunk of RAM
-//!   that survives a reset and reboots, and the next boot logs it.
+//! * [`report_last_panic`] prints the panic - or hard fault - from the
+//!   *previous* run. The USB logger is an async task, so it cannot flush once
+//!   we have died; instead the handler stashes the message in a chunk of RAM
+//!   that survives a reset and reboots, and the next boot logs it and then
+//!   holds long enough for USB to come up and a terminal to read it.
 //! * [`pairing_reminder`] re-prints the commissioning code periodically, so
 //!   attaching the serial terminal after the device has already booted still
 //!   gets you something to commission with.
@@ -136,10 +137,14 @@ fn panic_state() -> *mut PanicState {
     unsafe { (*addr_of_mut!(PANIC_STATE)).as_mut_ptr() }
 }
 
-/// Stash the panic message where the next boot can find it, then reboot so the
-/// USB logger gets a chance to print it.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+/// Stash `message` where the next boot can find it, then reboot.
+///
+/// Rebooting is what eventually gets the message out: a boot is the only thing
+/// that brings USB up, and the logger cannot flush from in here - it is an
+/// async task and the executor is not running any more. Rebooting
+/// unconditionally, even after repeated faults, is deliberate;
+/// [`report_last_panic`] is what decides to stop trying.
+fn store_and_reset(message: core::fmt::Arguments) -> ! {
     let state = panic_state();
 
     // Volatile throughout: on the first ever boot this memory is genuinely
@@ -157,7 +162,7 @@ fn panic(info: &PanicInfo) -> ! {
         len: 0,
     };
     // `MsgWriter` truncates instead of failing, so this cannot itself panic.
-    let _ = write!(writer, "{}", info);
+    let _ = write!(writer, "{}", message);
 
     unsafe {
         write_volatile(addr_of_mut!((*state).len), writer.len as u32);
@@ -166,14 +171,28 @@ fn panic(info: &PanicInfo) -> ! {
         write_volatile(addr_of_mut!((*state).magic), PANIC_MAGIC);
     }
 
-    if resets >= MAX_AUTO_RESETS {
-        // Panicking every boot. Stop rebooting and let the message stand.
-        loop {
-            cortex_m::asm::wfe();
-        }
-    }
-
     cortex_m::peripheral::SCB::sys_reset()
+}
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    store_and_reset(format_args!("{}", info))
+}
+
+/// Record a hard fault the same way a panic is recorded.
+///
+/// A fault - a bad pointer, a stack overflow - is not a panic and never
+/// reaches `#[panic_handler]`; without this it would land in `cortex-m-rt`'s
+/// default handler and simply hang, with nothing to read afterwards. `pc` is
+/// the faulting instruction: look it up with
+/// `arm-none-eabi-addr2line -e target/.../<bin> <pc>`.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(frame: &cortex_m_rt::ExceptionFrame) -> ! {
+    store_and_reset(format_args!(
+        "HardFault at pc={:#010x} lr={:#010x}",
+        frame.pc(),
+        frame.lr()
+    ))
 }
 
 /// Log the panic message left behind by the previous run, if any, and then
@@ -211,7 +230,17 @@ pub async fn report_last_panic() {
     }
 
     if resets >= MAX_AUTO_RESETS {
-        warn!("Panicked {} times in a row; not rebooting again", resets);
+        // Carrying on would just panic again. Park instead - and park *here*,
+        // with the executor still running the logger, so USB stays enumerated
+        // and the message stays readable. Power-cycle to start over; that is
+        // also what clears the count, since it lives in RAM.
+        warn!(
+            "Died {} times in a row - parking with USB up rather than trying again. \
+             Power-cycle to start over.",
+            resets
+        );
+
+        core::future::pending::<()>().await
     }
 
     warn!(
