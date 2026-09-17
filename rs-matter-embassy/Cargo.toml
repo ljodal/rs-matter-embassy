@@ -317,7 +317,14 @@ esp-radio = { version = "1.0.0-beta.1", optional = true, features = ["ble"] }
 esp-hal = { version = "~1.2", optional = true, features = ["unstable"] }
 
 # Only necessary when `rs-matter-embassy` is providing extra-sugar for the RPi Pico W MCU
-cyw43 = { version = "0.7", optional = true, features = ["firmware-logs", "bluetooth"] }
+# Deliberately without `firmware-logs`. It makes the cyw43 runner re-read a
+# pointer out of the chip's shared memory on every iteration and pass it
+# straight to `bp_read`, which asserts the address is 4-aligned. On RP2350 that
+# read comes back misaligned — see embassy-rs/embassy#3612 and #3960, where
+# turning the feature off is the cure — and the panic takes the whole device
+# down. It is a debug aid that logs at `debug!`; a library should not force it
+# on, and an application that wants it can ask for it itself.
+cyw43 = { version = "0.7", optional = true, features = ["bluetooth"] }
 cyw43-pio = { version = "0.10", optional = true }
 embassy-rp = { version = "0.10", optional = true, features = ["unstable-pac"] }
 embassy-net-driver-channel = { version = "0.4", optional = true }
